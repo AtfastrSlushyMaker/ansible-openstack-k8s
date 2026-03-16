@@ -1,0 +1,85 @@
+heat_template_version: 2018-08-31
+description: K8s Cluster - Two File Method
+
+parameters:
+  image: {type: string}
+  flavor_master: {type: string}
+  flavor_worker: {type: string}
+  network: {type: string}
+  subnet: {type: string}
+  security_groups: {type: comma_delimited_list}
+  floatingip_network: {type: string}
+  worker_count: {type: number, default: 2}
+  master_name: {type: string}
+  worker_name_prefix: {type: string}
+  keypair_name: {type: string}
+
+resources:
+
+  master_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: network }
+      fixed_ips: [{ subnet: { get_param: subnet } }]
+      security_groups: { get_param: security_groups }
+
+  master:
+    type: OS::Nova::Server
+    properties:
+      name: { get_param: master_name }
+      image: { get_param: image }
+      flavor: { get_param: flavor_master }
+      key_name: { get_param: keypair_name }
+      networks: [{ port: { get_resource: master_port } }]
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        useradd -m -s /bin/bash user || true
+        echo "user:user" | chpasswd
+        echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-user
+        rm -f /etc/ssh/sshd_config.d/*.conf || true
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        systemctl restart ssh
+
+  master_fip:
+    type: OS::Neutron::FloatingIP
+    properties: { floating_network: { get_param: floatingip_network } }
+
+  master_fip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: master_fip }
+      port_id: { get_resource: master_port }
+
+  worker_group:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: worker_count }
+      resource_def:
+        type: worker_node.yaml
+        properties:
+          image: { get_param: image }
+          flavor: { get_param: flavor_worker } # Pass down flavor_worker
+          keypair_name: { get_param: keypair_name }
+          network: { get_param: network }
+          subnet: { get_param: subnet }
+          security_groups: { get_param: security_groups }
+          floatingip_network: { get_param: floatingip_network }
+          name:
+            str_replace:
+              template: PREFIX%index%
+              params: { PREFIX: { get_param: worker_name_prefix } }
+
+outputs:
+  master_floating_ip:
+    value: { get_attr: [master_fip, floating_ip_address] }
+    description: Master floating IP address
+  master_fixed_ip:
+    value: { get_attr: [master_port, fixed_ips, 0, ip_address] }
+    description: Master fixed (self-service) IP address
+  worker_floating_ips:
+    value: { get_attr: [worker_group, worker_fip] }
+    description: List of worker floating IPs
+  worker_fixed_ips:
+    value: { get_attr: [worker_group, worker_fixed_ip] }
+    description: List of worker fixed (self-service) IPs

@@ -1,0 +1,265 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: {{ monitoring_namespace }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ prometheus_scrape_interval }}
+      evaluation_interval: 30s
+
+    scrape_configs:
+      # ── Prometheus self-monitoring ──
+      - job_name: "prometheus"
+        static_configs:
+          - targets: ["localhost:9090"]
+
+      # ── OpenStack exporter (Nova, Neutron, Cinder, Gnocchi metrics) ──
+      - job_name: "openstack"
+        scrape_interval: 60s
+        scrape_timeout: 30s
+        static_configs:
+          - targets: ["openstack-exporter.{{ monitoring_namespace }}.svc:9180"]
+
+      # ── Gnocchi / Ceilometer exporter (VM telemetry) ──
+      - job_name: "gnocchi"
+        scrape_interval: {{ gnocchi_scrape_interval }}
+        scrape_timeout: 55s
+        static_configs:
+          - targets: ["gnocchi-exporter.{{ monitoring_namespace }}.svc:9275"]
+
+      # ── Prediction exporter (ML forecasts) ──
+      - job_name: "prediction-exporter"
+        scrape_interval: 120s
+        scrape_timeout: 30s
+        static_configs:
+          - targets: ["prediction-exporter.{{ monitoring_namespace }}.svc:9290"]
+
+      # ── Node Exporter (host-level CPU, RAM, disk, network) ──
+      - job_name: "node-exporter"
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: ["{{ monitoring_namespace }}"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: node-exporter
+            action: keep
+
+      # ── kube-state-metrics (K8s object health) ──
+      - job_name: "kube-state-metrics"
+        static_configs:
+          - targets: ["kube-state-metrics.{{ monitoring_namespace }}.svc:8080"]
+
+      # ── Kubelet / cAdvisor (pod-level metrics) ──
+      - job_name: "kubelet"
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: "kubelet_.*"
+            action: keep
+
+      # ── cAdvisor (container metrics) ──
+      - job_name: "cadvisor"
+        scheme: https
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __metrics_path__
+            replacement: /metrics/cadvisor
+
+      # ── NGINX pods (if they expose metrics) ──
+      - job_name: "nginx"
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            regex: "true"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            regex: (.+);(.+)
+            target_label: __address__
+            replacement: "${1}:${2}"
+            action: replace
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: {{ monitoring_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/proxy, nodes/metrics, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: {{ monitoring_namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        runAsNonRoot: true
+      containers:
+        - name: prometheus
+          image: {{ prometheus_image }}
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.retention.time={{ prometheus_retention }}"
+            - "--web.enable-lifecycle"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openstack-exporter-config
+  namespace: {{ monitoring_namespace }}
+data:
+  clouds.yaml: |
+    clouds:
+      openstack:
+        auth:
+          auth_url: {{ keystone_url }}
+          username: {{ os_username }}
+          password: {{ os_password }}
+          project_name: {{ os_project_name }}
+          user_domain_name: {{ os_user_domain_name }}
+          project_domain_name: {{ os_project_domain_name }}
+        region_name: {{ os_region }}
+        identity_api_version: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openstack-exporter
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app: openstack-exporter
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app: openstack-exporter
+  template:
+    metadata:
+      labels:
+        app: openstack-exporter
+    spec:
+      hostAliases:
+        - ip: "{{ controller_ip }}"
+          hostnames:
+            - controller
+      containers:
+        - name: openstack-exporter
+          image: {{ openstack_exporter_image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--os-client-config=/etc/openstack/clouds.yaml"
+            - "--web.listen-address=:9180"
+            - "openstack"
+          ports:
+            - containerPort: 9180
+          volumeMounts:
+            - name: clouds-config
+              mountPath: /etc/openstack
+              readOnly: true
+      volumes:
+        - name: clouds-config
+          configMap:
+            name: openstack-exporter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openstack-exporter
+  namespace: {{ monitoring_namespace }}
+spec:
+  selector:
+    app: openstack-exporter
+  ports:
+    - name: metrics
+      port: 9180
+      targetPort: 9180
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {{ monitoring_namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+      nodePort: {{ prometheus_nodeport }}

@@ -1,0 +1,285 @@
+---
+# ── Prediction Exporter ──
+# Bridges the Pod Predictor with Prometheus/Grafana.
+# Periodically queries Prometheus for real pod metrics,
+# sends them to the predictor, and exposes results as
+# Prometheus metrics for Grafana to display.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prediction-exporter-code
+  namespace: {{ predictor_namespace }}
+data:
+  exporter.py: |
+{% raw %}
+    import time, json, logging, os
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from threading import Thread
+    from datetime import datetime
+    import requests
+
+    logging.basicConfig(level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logger = logging.getLogger("prediction-exporter")
+
+    PROM_URL = os.environ.get("PROMETHEUS_URL", "http://prometheus:9090")
+    PREDICTOR_URL = os.environ.get("PREDICTOR_URL",
+        "http://pod-predictor:8080/v1/models/pod-predictor:predict")
+    SCRAPE_RANGE = int(os.environ.get("SCRAPE_RANGE_MINUTES", "60"))
+    REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL", "120"))
+    PORT = int(os.environ.get("EXPORTER_PORT", "9290"))
+
+    metrics_output = "# No predictions yet\n"
+
+    def query_prometheus():
+        """Fetch real pod CPU and memory from Prometheus."""
+        end = time.time()
+        start = end - (SCRAPE_RANGE * 60)
+        step = 60
+
+        pods = {}
+        try:
+            # CPU usage per pod (rate over 2m)
+            cpu_r = requests.get(f"{PROM_URL}/api/v1/query_range", params={
+                "query": 'rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[2m])',
+                "start": start, "end": end, "step": step
+            }, timeout=30).json()
+
+            for series in cpu_r.get("data", {}).get("result", []):
+                pod = series["metric"].get("pod", "unknown")
+                ns = series["metric"].get("namespace", "unknown")
+                key = f"{ns}/{pod}"
+                for ts, val in series["values"]:
+                    t = datetime.utcfromtimestamp(float(ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    pods.setdefault(key, {})[t] = {
+                        "timestamp": t,
+                        "cpu": round(min(float(val), 1.0), 6),
+                        "memory": 0.0
+                    }
+
+            # Memory usage (fraction of limit, capped at 1.0)
+            mem_r = requests.get(f"{PROM_URL}/api/v1/query_range", params={
+                "query": 'container_memory_working_set_bytes{container!="",container!="POD"} / 1073741824',
+                "start": start, "end": end, "step": step
+            }, timeout=30).json()
+
+            for series in mem_r.get("data", {}).get("result", []):
+                pod = series["metric"].get("pod", "unknown")
+                ns = series["metric"].get("namespace", "unknown")
+                key = f"{ns}/{pod}"
+                for ts, val in series["values"]:
+                    t = datetime.utcfromtimestamp(float(ts)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if t in pods.get(key, {}):
+                        pods[key][t]["memory"] = round(min(float(val), 1.0), 6)
+
+        except Exception as e:
+            logger.error("Prometheus query failed: %s", e)
+            return {}
+
+        # Convert to predictor format, need at least 5 data points
+        result = {}
+        for key, samples in pods.items():
+            if len(samples) >= 5:
+                result[key] = sorted(samples.values(), key=lambda x: x["timestamp"])
+
+        logger.info("Collected metrics for %d pods from Prometheus", len(result))
+        return result
+
+    def call_predictor(pods_data):
+        """Send metrics to predictor and get forecasts."""
+        try:
+            resp = requests.post(PREDICTOR_URL,
+                json={"pods": pods_data}, timeout=120)
+            return resp.json()
+        except Exception as e:
+            logger.error("Predictor call failed: %s", e)
+            return {}
+
+    def format_metrics(prediction):
+        """Convert prediction results to Prometheus exposition format."""
+        lines = [
+            "# HELP pod_predicted_cpu_mean Predicted average CPU usage (next N minutes)",
+            "# TYPE pod_predicted_cpu_mean gauge",
+            "# HELP pod_predicted_cpu_max Predicted peak CPU usage (next N minutes)",
+            "# TYPE pod_predicted_cpu_max gauge",
+            "# HELP pod_predicted_memory_mean Predicted average memory usage (next N minutes)",
+            "# TYPE pod_predicted_memory_mean gauge",
+            "# HELP pod_predicted_memory_max Predicted peak memory usage (next N minutes)",
+            "# TYPE pod_predicted_memory_max gauge",
+            "# HELP pod_prediction_confidence Prediction confidence score (0-1)",
+            "# TYPE pod_prediction_confidence gauge",
+            "# HELP pod_recommendation Active recommendation (1=triggered, 0=none)",
+            "# TYPE pod_recommendation gauge",
+            "# HELP pod_prediction_horizon_minutes Prediction horizon in minutes",
+            "# TYPE pod_prediction_horizon_minutes gauge",
+        ]
+
+        horizon = prediction.get("horizon_minutes", 30)
+        lines.append(f'pod_prediction_horizon_minutes {horizon}')
+
+        for fc in prediction.get("forecasts", []):
+            raw_pod = fc.get("pod", "unknown")
+            # Split namespace/pod if present
+            if "/" in raw_pod:
+                ns, pod = raw_pod.split("/", 1)
+            else:
+                ns, pod = "default", raw_pod
+
+            labels = f'namespace="{ns}",pod="{pod}"'
+
+            cpu = fc.get("cpu", {})
+            if "error" not in cpu:
+                lines.append(f'pod_predicted_cpu_mean{{{labels}}} {cpu.get("predicted_mean", 0)}')
+                lines.append(f'pod_predicted_cpu_max{{{labels}}} {cpu.get("predicted_max", 0)}')
+                lines.append(f'pod_prediction_confidence{{{labels},metric="cpu"}} {cpu.get("confidence", 0)}')
+
+            mem = fc.get("memory", {})
+            if "error" not in mem:
+                lines.append(f'pod_predicted_memory_mean{{{labels}}} {mem.get("predicted_mean", 0)}')
+                lines.append(f'pod_predicted_memory_max{{{labels}}} {mem.get("predicted_max", 0)}')
+                lines.append(f'pod_prediction_confidence{{{labels},metric="memory"}} {mem.get("confidence", 0)}')
+
+        for rec in prediction.get("recommendations", []):
+            rec_pod = rec.get("pod", "unknown")
+            if "/" in rec_pod:
+                ns, pod = rec_pod.split("/", 1)
+            else:
+                ns, pod = "default", rec_pod
+            rec_type = rec.get("type", "unknown")
+            conf = rec.get("confidence", 0)
+            lines.append(f'pod_recommendation{{namespace="{ns}",pod="{pod}",type="{rec_type}"}} {conf}')
+
+        return "\n".join(lines) + "\n"
+
+    def refresh_loop():
+        """Background thread: periodically refresh predictions."""
+        global metrics_output
+        while True:
+            try:
+                logger.info("Refreshing predictions...")
+                pods_data = query_prometheus()
+                if pods_data:
+                    prediction = call_predictor(pods_data)
+                    if prediction.get("status") == "ok":
+                        metrics_output = format_metrics(prediction)
+                        logger.info("Updated metrics: %d forecasts, %d recommendations",
+                            len(prediction.get("forecasts", [])),
+                            len(prediction.get("recommendations", [])))
+                    else:
+                        logger.warning("Predictor returned: %s",
+                            prediction.get("message", "unknown error"))
+                else:
+                    logger.warning("No pod data from Prometheus")
+            except Exception as e:
+                logger.error("Refresh failed: %s", e)
+            time.sleep(REFRESH_INTERVAL)
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/metrics":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(metrics_output.encode())
+            elif self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"healthy"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+        def log_message(self, fmt, *args):
+            pass  # suppress per-request logging
+
+    if __name__ == "__main__":
+        logger.info("Starting prediction exporter on port %d", PORT)
+        logger.info("Prometheus: %s | Predictor: %s | Refresh: %ds",
+            PROM_URL, PREDICTOR_URL, REFRESH_INTERVAL)
+        t = Thread(target=refresh_loop, daemon=True)
+        t.start()
+        server = HTTPServer(("0.0.0.0", PORT), MetricsHandler)
+        server.serve_forever()
+{% endraw %}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prediction-exporter
+  namespace: {{ predictor_namespace }}
+  labels:
+    app: prediction-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prediction-exporter
+  template:
+    metadata:
+      labels:
+        app: prediction-exporter
+    spec:
+      containers:
+        - name: exporter
+          image: python:3.10-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              pip install --no-cache-dir -q requests && python /app/exporter.py
+          ports:
+            - containerPort: 9290
+              name: metrics
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus.{{ predictor_namespace }}.svc:9090"
+            - name: PREDICTOR_URL
+              value: "http://pod-predictor.{{ predictor_namespace }}.svc:8080/v1/models/pod-predictor:predict"
+            - name: SCRAPE_RANGE_MINUTES
+              value: "60"
+            - name: REFRESH_INTERVAL
+              value: "120"
+            - name: EXPORTER_PORT
+              value: "9290"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9290
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9290
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: code
+          configMap:
+            name: prediction-exporter-code
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prediction-exporter
+  namespace: {{ predictor_namespace }}
+  labels:
+    app: prediction-exporter
+spec:
+  selector:
+    app: prediction-exporter
+  ports:
+    - port: 9290
+      targetPort: 9290
+      protocol: TCP
+      name: metrics

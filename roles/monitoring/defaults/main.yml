@@ -1,0 +1,46 @@
+---
+# ── Namespace ──
+monitoring_namespace: monitoring
+
+# ── NodePorts ──
+grafana_nodeport: 32000
+prometheus_nodeport: 32001
+
+# ── Grafana ──
+grafana_image: "grafana/grafana:11.5.1"
+grafana_admin_user: admin
+grafana_admin_password: admin
+grafana_smtp_enabled: true
+grafana_smtp_host: "smtp.gmail.com"
+grafana_smtp_port: 587
+grafana_smtp_user: "butterflyeffect2026.contact@gmail.com"
+grafana_smtp_password: "ubdw ndkf bevw hkss"
+grafana_smtp_from_address: "butterflyeffect2026.contact@gmail.com"
+grafana_smtp_from_name: "Grafana"
+grafana_smtp_skip_verify: false
+grafana_smtp_starttls_policy: "OpportunisticStartTLS"
+
+# ── Prometheus ──
+prometheus_image: "prom/prometheus:v3.2.1"
+prometheus_retention: "15d"
+prometheus_scrape_interval: "30s"
+
+# ── Gnocchi / Ceilometer ──
+gnocchi_url: "http://controller:8041"
+keystone_url: "http://controller:5000/v3"
+os_username: "admin"
+os_password: "butterfly123"
+os_project_name: "frontend"
+os_user_domain_name: "dev"
+os_project_domain_name: "dev"
+os_region: "RegionOne"
+gnocchi_exporter_url: "gnocchi-exporter.{{ monitoring_namespace }}.svc:9275"
+gnocchi_scrape_interval: "60s"
+
+# ── Controller IP (for pod DNS resolution) ──
+controller_ip: "192.168.2.50"
+
+# ── Exporters ──
+openstack_exporter_image: "ghcr.io/openstack-exporter/openstack-exporter:latest"
+node_exporter_image: "prom/node-exporter:v1.9.0"
+kube_state_metrics_image: "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0"

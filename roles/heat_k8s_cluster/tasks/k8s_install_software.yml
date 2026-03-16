@@ -1,0 +1,299 @@
+---
+# 1. IMMEDIATE NETWORK FIX
+- name: Apply OpenStack Network Workarounds (DNS, MTU & hostname)
+  become: true
+  ansible.builtin.shell: |
+    # Lower MTU on ALL non-loopback interfaces to handle VXLAN/GRE overhead
+    for iface in $(ls /sys/class/net/ | grep -v lo); do
+      ip link set dev "$iface" mtu 1300 2>/dev/null || true
+    done
+
+    # Set reliable DNS for provisioning (includes fallback)
+    echo -e "nameserver 8.8.8.8\nnameserver 8.8.4.4" > /etc/resolv.conf
+
+    # Ensure the VM hostname resolves locally so sudo never hangs on DNS
+    MYHOSTNAME=$(hostname)
+    grep -qF "$MYHOSTNAME" /etc/hosts || echo "127.0.1.1 $MYHOSTNAME" >> /etc/hosts
+  changed_when: true
+
+- name: Pin Ubuntu mirror to archive.ubuntu.com
+  become: true
+  ansible.builtin.shell: |
+    # Handle deb822 format (Ubuntu 24.04+)
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+      sed -i 's|http://[a-zA-Z0-9.-]*\.clouds\.archive\.ubuntu\.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+    fi
+    # Handle legacy format (Ubuntu 22.04 and earlier)
+    if [ -f /etc/apt/sources.list ]; then
+      sed -i 's|http://[a-zA-Z0-9.-]*\.clouds\.archive\.ubuntu\.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+    fi
+  changed_when: true
+
+- name: Wait for network and DNS to settle
+  pause:
+    seconds: 10
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Ensure resolv.conf has working DNS
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    content: |
+      nameserver 8.8.8.8
+      nameserver 8.8.4.4
+    mode: "0644"
+  changed_when: false
+
+- name: Preflight DNS and mirror checks (no sudo)
+  block:
+    - name: Check DNS resolution
+      ansible.builtin.command: getent hosts archive.ubuntu.com
+      register: dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check mirror reachability (HTTP)
+      ansible.builtin.shell: curl -fsS --connect-timeout 5 http://archive.ubuntu.com/ubuntu/ > /dev/null
+      register: mirror_http_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check mirror reachability (HTTPS)
+      ansible.builtin.shell: curl -fsS --connect-timeout 5 https://archive.ubuntu.com/ubuntu/ > /dev/null
+      register: mirror_https_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show DNS/mirror checks
+      ansible.builtin.debug:
+        msg:
+          dns_ok: "{{ dns_check.rc == 0 }}"
+          mirror_http_ok: "{{ mirror_http_check.rc == 0 }}"
+          mirror_https_ok: "{{ mirror_https_check.rc == 0 }}"
+  become: false
+  vars:
+    ansible_become: false
+
+- name: Forcefully release apt lock
+  become: true
+  ansible.builtin.shell: |
+    systemctl stop apt-daily.service apt-daily-upgrade.service || true
+    killall apt apt-get || true
+    rm -f /var/lib/apt/lists/lock /var/lib/dpkg/lock*
+    dpkg --configure -a
+  changed_when: false
+
+- name: Disable apt timers during provisioning
+  become: true
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - apt-daily.service
+    - apt-daily-upgrade.service
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+
+- name: Disable SWAP (Mandatory for K8s)
+  become: true
+  ansible.builtin.shell: |
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+  changed_when: false
+
+- name: Load required kernel modules
+  become: true
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [overlay, br_netfilter]
+
+- name: Ensure modules load on boot
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: "0644"
+
+- name: Configure sysctl for Kubernetes networking
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/k8s.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+    mode: "0644"
+
+- name: Apply sysctl params immediately
+  become: true
+  ansible.builtin.command: sysctl --system
+  changed_when: true
+
+- name: Force IPv4 for apt to avoid IPv6 stalls
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99force-ipv4
+    content: |
+      Acquire::ForceIPv4 "true";
+      Acquire::Retries "5";
+    mode: "0644"
+
+- name: Set apt HTTP timeouts to avoid long hangs
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99timeouts
+    content: |
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::ftp::Timeout "30";
+    mode: "0644"
+
+- name: Clean stale apt lists from cloud-init
+  become: true
+  ansible.builtin.shell: rm -rf /var/lib/apt/lists/*
+  changed_when: false
+
+- name: Refresh apt cache with retries
+  become: true
+  ansible.builtin.shell: >
+    timeout 300 apt-get update -o Acquire::Retries=5
+    -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60
+    -o Acquire::ForceIPv4=true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: apt_update_result
+  changed_when: false
+  retries: 5
+  delay: 15
+  until: apt_update_result is success
+
+- name: Install prerequisite packages
+  become: true
+  ansible.builtin.apt:
+    name: [apt-transport-https, ca-certificates, curl, gpg, conntrack, socat]
+    state: present
+    update_cache: no
+    # Adding a timeout for slow OpenStack links
+    cache_valid_time: 3600
+    lock_timeout: 300
+    force_apt_get: true
+  register: prereq_apt_result
+  retries: 5
+  delay: 10
+  until: prereq_apt_result is success
+
+- name: Setup Kubernetes GPG key and Repository
+  become: true
+  block:
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Kubernetes GPG key (Native module is more stable)
+      ansible.builtin.get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key
+        dest: /tmp/k8s-release.key
+        mode: "0644"
+        timeout: 60
+        force: yes
+      register: gpg_result
+      until: gpg_result is success
+      retries: 5
+      delay: 5
+
+    - name: Dearmor Kubernetes GPG key
+      ansible.builtin.shell: cat /tmp/k8s-release.key | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      changed_when: true
+
+    - name: Add Kubernetes Repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /"
+        mode: "0644"
+
+- name: Refresh apt cache after adding Kubernetes repo
+  become: true
+  ansible.builtin.shell: >
+    timeout 180 apt-get update -o Acquire::Retries=5
+    -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+    -o Acquire::ForceIPv4=true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: k8s_repo_update
+  changed_when: false
+  retries: 5
+  delay: 10
+  until: k8s_repo_update is success
+
+- name: Check kubelet availability in apt cache
+  become: true
+  ansible.builtin.command: apt-cache policy kubelet
+  register: kubelet_policy
+  changed_when: false
+
+- name: Read Kubernetes repo file
+  become: true
+  ansible.builtin.command: cat /etc/apt/sources.list.d/kubernetes.list
+  register: k8s_repo_file
+  changed_when: false
+
+- name: Check Kubernetes keyring file
+  become: true
+  ansible.builtin.command: ls -l /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  register: k8s_keyring_file
+  changed_when: false
+  failed_when: false
+
+- name: Fail if kubelet is not available
+  ansible.builtin.fail:
+    msg: |
+      kubelet is not available in apt cache. This usually means the repo or key is not active.
+      kubelet policy:
+      {{ kubelet_policy.stdout }}
+      repo file:
+      {{ k8s_repo_file.stdout }}
+      keyring:
+      {{ k8s_keyring_file.stdout | default('missing') }}
+  when: "'Candidate: (none)' in kubelet_policy.stdout"
+
+- name: Install Containerd and K8s tools
+  become: true
+  ansible.builtin.apt:
+    name: [containerd, kubelet, kubeadm, kubectl]
+    state: present
+    update_cache: no
+    lock_timeout: 300
+    force_apt_get: true
+  register: k8s_apt_result
+  retries: 5
+  delay: 10
+  until: k8s_apt_result is success
+
+- name: Configure Containerd with Systemd Cgroup
+  become: true
+  ansible.builtin.shell: |
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+    sed -i 's|sandbox_image = .*|sandbox_image = "registry.k8s.io/pause:3.10"|g' /etc/containerd/config.toml
+  changed_when: true
+
+- name: Force immediate Containerd restart
+  become: true
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    daemon_reload: yes
+    enabled: yes
+
+- name: Ensure kubelet is enabled
+  become: true
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: yes

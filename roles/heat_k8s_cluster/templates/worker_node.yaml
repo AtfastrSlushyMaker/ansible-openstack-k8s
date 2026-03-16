@@ -1,0 +1,54 @@
+heat_template_version: 2018-08-31
+parameters:
+  name: { type: string }
+  image: { type: string }
+  flavor: { type: string }
+  keypair_name: { type: string }
+  network: { type: string }
+  subnet: { type: string }
+  security_groups: { type: comma_delimited_list }
+  floatingip_network: { type: string }
+
+resources:
+  w_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: network }
+      fixed_ips: [{ subnet: { get_param: subnet } }]
+      security_groups: { get_param: security_groups }
+
+  w_server:
+    type: OS::Nova::Server
+    properties:
+      name: { get_param: name }
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: keypair_name }
+      networks: [{ port: { get_resource: w_port } }]
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        useradd -m -s /bin/bash user || true
+        echo "user:user" | chpasswd
+        echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-user
+        rm -f /etc/ssh/sshd_config.d/*.conf || true
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        systemctl restart ssh
+
+  w_fip:
+    type: OS::Neutron::FloatingIP
+    properties: { floating_network: { get_param: floatingip_network } }
+
+  w_fip_assoc:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: w_fip }
+      port_id: { get_resource: w_port }
+
+outputs:
+  worker_fip:
+    value: { get_attr: [w_fip, floating_ip_address] }
+    description: Worker floating IP address
+  worker_fixed_ip:
+    value: { get_attr: [w_port, fixed_ips, 0, ip_address] }
+    description: Worker fixed (self-service) IP address

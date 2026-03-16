@@ -1,0 +1,302 @@
+---
+- name: Phase 0 - Refresh Inventory from Heat (always runs)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+
+  tasks:
+    - name: Query current master floating IP
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} master_floating_ip -f json
+      register: output_master_fip
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Query current worker floating IPs
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} worker_floating_ips -f json
+      register: output_worker_fips
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Query current master fixed IP
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} master_fixed_ip -f json
+      register: output_master_fixed
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Query current worker fixed IPs
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} worker_fixed_ips -f json
+      register: output_worker_fixed
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: Set IP facts from stack
+      ansible.builtin.set_fact:
+        master_fip: "{{ (output_master_fip.stdout | from_json).output_value }}"
+        master_fixed_ip: "{{ (output_master_fixed.stdout | from_json).output_value }}"
+        worker_fips: "{{ (output_worker_fips.stdout | from_json).output_value | default([], true) }}"
+        worker_fixed_ips: "{{ (output_worker_fixed.stdout | from_json).output_value | default([], true) }}"
+      when: output_master_fip.rc == 0
+      tags: [always]
+
+    - name: Update permanent inventory file
+      ansible.builtin.template:
+        src: templates/hosts_k8s.ini.j2
+        dest: "{{ inventory_dest }}"
+        mode: "0644"
+      when: master_fip is defined
+      tags: [always]
+
+    - name: Add master to run-time inventory
+      ansible.builtin.add_host:
+        name: "master_node"
+        groups: k8s_master
+        ansible_host: "{{ master_fip }}"
+        ansible_user: "{{ ansible_user }}"
+        ansible_password: "{{ ansible_password }}"
+        ansible_become: true
+        ansible_become_pass: "{{ ansible_become_password }}"
+        ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+      when: master_fip is defined
+      tags: [always]
+
+    - name: Add workers to run-time inventory
+      ansible.builtin.add_host:
+        name: "worker_{{ item.0 }}"
+        groups: k8s_workers
+        ansible_host: "{{ item.1 }}"
+        ansible_user: "{{ ansible_user }}"
+        ansible_password: "{{ ansible_password }}"
+        ansible_become: true
+        ansible_become_pass: "{{ ansible_become_password }}"
+        ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+      loop: "{{ query('indexed_items', worker_fips) }}"
+      when: worker_fips is defined
+      tags: [always]
+
+- name: Phase 1 - Deploy Infrastructure with Heat
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+
+  tasks:
+    - name: 1. Create Heat Stack (Provision VMs)
+      ansible.builtin.include_role:
+        name: heat_k8s_cluster
+        tasks_from: main.yml
+      tags: [infra]
+
+    - name: 2. Build and Save Permanent Inventory File
+      ansible.builtin.template:
+        src: templates/hosts_k8s.ini.j2
+        dest: "{{ inventory_dest }}"
+        mode: "0644"
+      tags: [inventory]
+
+- name: Phase 2 - Configure and Initialize Kubernetes Cluster
+  hosts: k8s_master,k8s_workers
+  gather_facts: false
+  become: true
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+  vars:
+    ansible_ssh_extra_args: "{{ k8s_ssh_extra_args }}"
+    ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+
+  tasks:
+    - name: Wait for SSH to be ready on new VMs
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 300
+
+    - name: Gather facts for K8s configuration
+      ansible.builtin.setup:
+
+    - name: 1. Install K8s Software (Containerd, Kubeadm, etc.)
+      ansible.builtin.include_role:
+        name: heat_k8s_cluster
+        tasks_from: k8s_install_software.yml
+      tags: [k8s, install]
+
+    - name: 2. Initialize Master Node
+      ansible.builtin.include_role:
+        name: heat_k8s_cluster
+        tasks_from: k8s_master_setup.yml
+      when: inventory_hostname == 'master_node'
+      tags: [k8s, master]
+
+    - name: 3. Join Worker Nodes to Cluster
+      ansible.builtin.include_role:
+        name: heat_k8s_cluster
+        tasks_from: k8s_worker_setup.yml
+      when: inventory_hostname in groups['k8s_workers']
+      tags: [k8s, workers]
+
+    # --- FIXED: Use explicit kubeconfig for verification ---
+    - name: 4. Verify Cluster Status
+      ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config get nodes
+      register: nodes_list
+      run_once: true
+      delegate_to: master_node
+      become: false
+      changed_when: false
+      tags: [verify]
+
+    - name: Display Cluster Nodes
+      ansible.builtin.debug:
+        var: nodes_list.stdout_lines
+      run_once: true
+
+    - name: Render NGINX NodePort manifest (optional)
+      ansible.builtin.template:
+        src: templates/nginx-nodeport.yaml.j2
+        dest: /tmp/nginx-nodeport.yaml
+        mode: "0644"
+      run_once: true
+      delegate_to: master_node
+      become: false
+      when: deploy_nginx_demo | default(false)
+      tags: [nginx]
+
+    - name: Apply NGINX manifest (optional)
+      ansible.builtin.command: kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config apply -f /tmp/nginx-nodeport.yaml
+      register: nginx_apply
+      changed_when: "'created' in nginx_apply.stdout or 'configured' in nginx_apply.stdout"
+      run_once: true
+      delegate_to: master_node
+      become: false
+      when: deploy_nginx_demo | default(false)
+      tags: [nginx]
+
+    - name: Show NGINX URL (optional)
+      ansible.builtin.debug:
+        msg: "NGINX NodePort URL: http://{{ hostvars['localhost'].master_fip }}:{{ nginx_nodeport }}"
+      run_once: true
+      delegate_to: localhost
+      become: false
+      when: deploy_nginx_demo | default(false)
+      tags: [nginx]
+
+- name: Phase 2.5 - Pre-pull container images on all cluster nodes
+  hosts: k8s_master,k8s_workers
+  gather_facts: false
+  become: true
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+  vars:
+    ansible_ssh_extra_args: "{{ k8s_ssh_extra_args }}"
+    ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+    monitoring_images:
+      - "docker.io/prom/prometheus:v3.2.1"
+      - "docker.io/grafana/grafana:11.5.1"
+      - "docker.io/prom/node-exporter:v1.9.0"
+      - "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0"
+      - "docker.io/library/python:3.11-slim"
+      - "docker.io/library/python:3.10-slim"
+
+  tasks:
+    - name: Pre-pull monitoring images with crictl (best-effort)
+      ansible.builtin.command: "crictl pull {{ item }}"
+      loop: "{{ monitoring_images }}"
+      changed_when: false
+      failed_when: false
+      async: 900
+      poll: 0
+      register: pull_jobs
+      tags: [prepull]
+
+    - name: Wait for image pulls to finish (best-effort, 10 min max)
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ pull_jobs.results }}"
+      register: pull_results
+      until: pull_results.finished
+      retries: 60
+      delay: 10
+      failed_when: false
+      tags: [prepull]
+
+    - name: Report pre-pull results
+      ansible.builtin.debug:
+        msg: "{{ item.item.item }}: {{ 'OK' if (item.rc | default(1)) == 0 else 'SKIPPED (will pull during deploy)' }}"
+      loop: "{{ pull_results.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+      tags: [prepull]
+
+    - name: Pre-pull OpenStack exporter (best-effort)
+      ansible.builtin.command: "crictl pull ghcr.io/openstack-exporter/openstack-exporter:latest"
+      changed_when: false
+      failed_when: false
+      async: 900
+      poll: 0
+      tags: [prepull]
+
+- name: Phase 3 - Deploy Monitoring Stack (Prometheus + Grafana)
+  hosts: k8s_master
+  gather_facts: false
+  become: false
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+  vars:
+    ansible_ssh_extra_args: "{{ k8s_ssh_extra_args }}"
+    ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+
+  tasks:
+    - name: Wait for all nodes to be Ready
+      ansible.builtin.shell: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config get nodes --no-headers |
+        awk '{print $2}' | grep -v Ready || true
+      register: not_ready
+      until: not_ready.stdout == ""
+      retries: 20
+      delay: 15
+      changed_when: false
+
+    - name: Wait for Flannel to be Ready
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n kube-flannel wait --for=condition=Ready pod -l app=flannel --timeout=300s
+      changed_when: false
+
+    - name: Deploy Monitoring Stack
+      ansible.builtin.include_role:
+        name: monitoring
+        apply:
+          tags: [monitoring]
+      tags: [monitoring]
+
+- name: Phase 4 - Deploy KServe Pod Predictor (ML Forecasting)
+  hosts: k8s_master
+  gather_facts: false
+  become: false
+  vars_files:
+    - vars/cluster.yml
+    - vars/credentials.yml
+  vars:
+    ansible_ssh_extra_args: "{{ k8s_ssh_extra_args }}"
+    ansible_ssh_common_args: "{{ k8s_ssh_common_args }}"
+
+  tasks:
+    - name: Deploy KServe Pod Predictor
+      ansible.builtin.include_role:
+        name: kserve_predictor
+        apply:
+          tags: [predictor]
+      tags: [predictor]

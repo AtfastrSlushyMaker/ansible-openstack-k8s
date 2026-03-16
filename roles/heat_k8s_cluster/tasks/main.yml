@@ -1,0 +1,146 @@
+---
+# 1. INFRASTRUCTURE PHASE (Runs on localhost only)
+# -----------------------------------------------
+- name: Infrastructure - Render and Deploy Heat Stack
+  block:
+    - name: Ensure keypair exists
+      openstack.cloud.keypair:
+        name: "{{ keypair_name }}"
+        public_key_file: "{{ keypair_public_key_path }}"
+        state: present
+
+    - name: Ensure NodePort security group rule exists
+      openstack.cloud.security_group_rule:
+        security_group: "{{ item }}"
+        direction: ingress
+        protocol: tcp
+        port_range_min: "{{ nodeport_range_start }}"
+        port_range_max: "{{ nodeport_range_end }}"
+        remote_ip_prefix: "{{ nodeport_remote_cidr }}"
+        description: "Kubernetes NodePort"
+        state: present
+      loop: "{{ security_groups | default([]) }}"
+      when: security_groups | length > 0
+
+    - name: Render Worker template
+      ansible.builtin.template:
+        src: worker_node.yaml
+        dest: "/tmp/worker_node.yaml"
+
+    - name: Render Main template
+      ansible.builtin.template:
+        src: k8s_cluster.yaml.j2
+        dest: "/tmp/{{ stack_name }}.yaml"
+
+    - name: Create/Update Heat stack
+      openstack.cloud.stack:
+        name: "{{ stack_name }}"
+        state: present
+        wait: true
+        template: "/tmp/{{ stack_name }}.yaml"
+        parameters:
+          image: "{{ image }}"
+          flavor_master: "{{ flavor_master }}"
+          flavor_worker: "{{ flavor_worker }}"
+          network: "{{ network }}"
+          subnet: "{{ subnet }}"
+          floatingip_network: "{{ floatingip_network }}"
+          worker_count: "{{ worker_count | int }}"
+          master_name: "{{ master_name }}"
+          worker_name_prefix: "{{ worker_name_prefix }}"
+          keypair_name: "{{ keypair_name }}"
+          security_groups: "{{ security_groups }}"
+      register: stack_out
+
+    - name: Check Heat stack status
+      ansible.builtin.command: >
+        openstack stack show {{ stack_name }} -f json
+      register: stack_show
+      changed_when: false
+
+    - name: Fail if Heat stack is not complete
+      ansible.builtin.fail:
+        msg: "Heat stack {{ stack_name }} is {{ (stack_show.stdout | from_json).stack_status }}. Check 'openstack stack failures list {{ stack_name }}'."
+      when: "(stack_show.stdout | from_json).stack_status not in ['CREATE_COMPLETE', 'UPDATE_COMPLETE']"
+
+    - name: Wait for Heat outputs to fully resolve
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} worker_floating_ips -f json
+      register: worker_output_check
+      until: "(worker_output_check.stdout | from_json).output_value is not none"
+      retries: 12
+      delay: 10
+      changed_when: false
+
+    - name: Retrieve all stack outputs
+      ansible.builtin.command: >
+        openstack stack output list {{ stack_name }} -f json
+      register: stack_outputs_list
+      changed_when: false
+
+    - name: Retrieve master floating IP
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} master_floating_ip -f json
+      register: output_master_fip
+      changed_when: false
+
+    - name: Retrieve master fixed IP
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} master_fixed_ip -f json
+      register: output_master_fixed
+      changed_when: false
+
+    - name: Retrieve worker floating IPs
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} worker_floating_ips -f json
+      register: output_worker_fips
+      changed_when: false
+
+    - name: Retrieve worker fixed IPs
+      ansible.builtin.command: >
+        openstack stack output show {{ stack_name }} worker_fixed_ips -f json
+      register: output_worker_fixed
+      changed_when: false
+
+    - name: Debug Heat stack outputs
+      ansible.builtin.debug:
+        msg:
+          master_fip: "{{ (output_master_fip.stdout | from_json).output_value }}"
+          master_fixed: "{{ (output_master_fixed.stdout | from_json).output_value }}"
+          worker_fips: "{{ (output_worker_fips.stdout | from_json).output_value }}"
+          worker_fixed: "{{ (output_worker_fixed.stdout | from_json).output_value }}"
+
+    - name: Extract IPs from Heat Output
+      ansible.builtin.set_fact:
+        master_fip: "{{ (output_master_fip.stdout | from_json).output_value }}"
+        master_fixed_ip: "{{ (output_master_fixed.stdout | from_json).output_value }}"
+        worker_fips: "{{ (output_worker_fips.stdout | from_json).output_value | default([], true) }}"
+        worker_fixed_ips: "{{ (output_worker_fixed.stdout | from_json).output_value | default([], true) }}"
+
+    - name: Add master to run-time inventory
+      ansible.builtin.add_host:
+        name: "master_node"
+        groups: k8s_master
+        ansible_host: "{{ master_fip }}"
+        ansible_user: "{{ ansible_user }}"
+        ansible_password: "{{ ansible_password }}"
+        ansible_become: true
+        ansible_become_pass: "{{ ansible_become_password }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+    - name: Add workers to run-time inventory
+      ansible.builtin.add_host:
+        name: "worker_{{ item.0 }}"
+        groups: k8s_workers
+        ansible_host: "{{ item.1 }}"
+        ansible_user: "{{ ansible_user }}"
+        ansible_password: "{{ ansible_password }}"
+        ansible_become: true
+        ansible_become_pass: "{{ ansible_become_password }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+      loop: "{{ query('indexed_items', worker_fips) }}"
+
+  delegate_to: localhost
+  run_once: true
+# DO NOT include k8s_install_software.yml here.
+# It will be called from deploy_k8s_cluster.yml for the specific k8s hosts.

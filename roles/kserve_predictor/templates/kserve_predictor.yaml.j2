@@ -1,0 +1,107 @@
+---
+# ── Deployment: Pod Predictor ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pod-predictor
+  namespace: {{ predictor_namespace }}
+  labels:
+    app: pod-predictor
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app: pod-predictor
+  template:
+    metadata:
+      labels:
+        app: pod-predictor
+    spec:
+      containers:
+        - name: predictor
+          image: python:3.10-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "Installing system deps..."
+              apt-get update -qq && apt-get install -y -qq build-essential gcc g++ > /dev/null 2>&1
+              echo "Installing Python deps..."
+              pip install --no-cache-dir -q -r /app/requirements.txt
+              echo "Starting predictor server..."
+              cd /app && python inference.py
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PREDICTION_HORIZON_MINUTES
+              value: "{{ prediction_horizon_minutes }}"
+            - name: CPU_HIGH_THRESHOLD
+              value: "{{ cpu_high_threshold }}"
+            - name: CPU_LOW_THRESHOLD
+              value: "{{ cpu_low_threshold }}"
+            - name: MEMORY_HIGH_THRESHOLD
+              value: "{{ memory_high_threshold }}"
+            - name: MEMORY_LOW_THRESHOLD
+              value: "{{ memory_low_threshold }}"
+            - name: CONFIDENCE_THRESHOLD
+              value: "{{ confidence_threshold }}"
+            - name: PREDICTOR_PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: "{{ log_level }}"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "3Gi"
+          startupProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 120
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v2/health/live
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        - name: code
+          configMap:
+            name: predictor-code
+            defaultMode: 0755
+---
+# ── Service: NodePort for external access ──
+apiVersion: v1
+kind: Service
+metadata:
+  name: pod-predictor
+  namespace: {{ predictor_namespace }}
+  labels:
+    app: pod-predictor
+spec:
+  type: NodePort
+  selector:
+    app: pod-predictor
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: {{ predictor_nodeport }}
+      protocol: TCP
+      name: http

@@ -1,0 +1,38 @@
+{
+  "pods": {
+    "nginx-deployment-abc123": [
+      {"timestamp": "2026-02-17T10:00:00Z", "cpu": 0.35, "memory": 0.40},
+      {"timestamp": "2026-02-17T10:01:00Z", "cpu": 0.38, "memory": 0.41},
+      {"timestamp": "2026-02-17T10:02:00Z", "cpu": 0.42, "memory": 0.43},
+      {"timestamp": "2026-02-17T10:03:00Z", "cpu": 0.45, "memory": 0.44},
+      {"timestamp": "2026-02-17T10:04:00Z", "cpu": 0.50, "memory": 0.46},
+      {"timestamp": "2026-02-17T10:05:00Z", "cpu": 0.55, "memory": 0.48},
+      {"timestamp": "2026-02-17T10:06:00Z", "cpu": 0.60, "memory": 0.50},
+      {"timestamp": "2026-02-17T10:07:00Z", "cpu": 0.62, "memory": 0.52},
+      {"timestamp": "2026-02-17T10:08:00Z", "cpu": 0.65, "memory": 0.55},
+      {"timestamp": "2026-02-17T10:09:00Z", "cpu": 0.70, "memory": 0.58},
+      {"timestamp": "2026-02-17T10:10:00Z", "cpu": 0.72, "memory": 0.60},
+      {"timestamp": "2026-02-17T10:11:00Z", "cpu": 0.75, "memory": 0.62},
+      {"timestamp": "2026-02-17T10:12:00Z", "cpu": 0.78, "memory": 0.65},
+      {"timestamp": "2026-02-17T10:13:00Z", "cpu": 0.80, "memory": 0.68},
+      {"timestamp": "2026-02-17T10:14:00Z", "cpu": 0.82, "memory": 0.70}
+    ],
+    "redis-pod-xyz789": [
+      {"timestamp": "2026-02-17T10:00:00Z", "cpu": 0.05, "memory": 0.08},
+      {"timestamp": "2026-02-17T10:01:00Z", "cpu": 0.04, "memory": 0.07},
+      {"timestamp": "2026-02-17T10:02:00Z", "cpu": 0.06, "memory": 0.09},
+      {"timestamp": "2026-02-17T10:03:00Z", "cpu": 0.03, "memory": 0.06},
+      {"timestamp": "2026-02-17T10:04:00Z", "cpu": 0.05, "memory": 0.08},
+      {"timestamp": "2026-02-17T10:05:00Z", "cpu": 0.04, "memory": 0.07},
+      {"timestamp": "2026-02-17T10:06:00Z", "cpu": 0.06, "memory": 0.09},
+      {"timestamp": "2026-02-17T10:07:00Z", "cpu": 0.03, "memory": 0.06},
+      {"timestamp": "2026-02-17T10:08:00Z", "cpu": 0.05, "memory": 0.08},
+      {"timestamp": "2026-02-17T10:09:00Z", "cpu": 0.04, "memory": 0.07},
+      {"timestamp": "2026-02-17T10:10:00Z", "cpu": 0.06, "memory": 0.09},
+      {"timestamp": "2026-02-17T10:11:00Z", "cpu": 0.03, "memory": 0.06},
+      {"timestamp": "2026-02-17T10:12:00Z", "cpu": 0.05, "memory": 0.08},
+      {"timestamp": "2026-02-17T10:13:00Z", "cpu": 0.04, "memory": 0.07},
+      {"timestamp": "2026-02-17T10:14:00Z", "cpu": 0.06, "memory": 0.09}
+    ]
+  }
+}

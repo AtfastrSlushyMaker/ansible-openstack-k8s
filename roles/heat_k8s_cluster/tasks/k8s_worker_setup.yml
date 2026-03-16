@@ -1,0 +1,50 @@
+---
+- name: Check if worker is actually joined to the current cluster
+  become: true
+  ansible.builtin.shell: |
+    # kubelet.conf may exist from a previous cluster — verify the node is actually registered
+    if [ ! -f /etc/kubernetes/kubelet.conf ]; then
+      echo "no_conf"
+      exit 1
+    fi
+    # Try to contact the API server; if it rejects us, the join is stale
+    timeout 10 kubectl --kubeconfig=/etc/kubernetes/kubelet.conf get nodes > /dev/null 2>&1
+  register: kube_worker_check
+  changed_when: false
+  failed_when: false
+
+- name: Reset stale kubeadm state if worker is not in the current cluster
+  become: true
+  ansible.builtin.command: kubeadm reset -f
+  when: kube_worker_check.rc != 0 and kube_worker_check.stdout != 'no_conf'
+
+- name: Apply OpenStack Network Workarounds (MTU)
+  become: true
+  ansible.builtin.shell: |
+    for iface in $(ls /sys/class/net/ | grep -v lo); do
+      ip link set dev "$iface" mtu 1300 2>/dev/null || true
+    done
+  when: kube_worker_check.rc != 0
+  changed_when: true
+
+- name: Join Worker to Cluster
+  become: true
+  ansible.builtin.command:
+    # Dynamically pulls the join command from the first host in the k8s_master group
+    cmd: "{{ hostvars[groups['k8s_master'][0]]['k8s_join_command'] }}"
+  register: join_result
+  # Retry logic is vital in OpenStack as the API server can be slow to respond initially
+  until: join_result is success
+  retries: 5
+  delay: 15
+  when:
+    - kube_worker_check.rc != 0
+    - hostvars[groups['k8s_master'][0]]['k8s_join_command'] is defined
+
+- name: Ensure kubelet is started and enabled
+  become: true
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+    enabled: yes
+  when: kube_worker_check.rc != 0

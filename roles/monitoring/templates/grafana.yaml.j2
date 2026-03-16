@@ -1,0 +1,940 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: {{ monitoring_namespace }}
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus.{{ monitoring_namespace }}.svc:9090
+        isDefault: true
+        editable: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provider
+  namespace: {{ monitoring_namespace }}
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        orgId: 1
+        folder: ""
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: {{ monitoring_namespace }}
+data:
+  k8s-cluster.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "title": "Kubernetes Cluster",
+      "uid": "k8s-cluster",
+      "panels": [
+        {
+          "title": "Cluster Overview",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "title": "Node Count",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "targets": [{ "expr": "count(kube_node_info)", "legendFormat": "Nodes" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Ready Nodes",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+          "targets": [{ "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"})", "legendFormat": "Ready" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [{"color": "red", "value": 0}, {"color": "green", "value": 1}] } } }
+        },
+        {
+          "title": "Total Pods",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+          "targets": [{ "expr": "count(kube_pod_info)", "legendFormat": "Pods" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Running Pods",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+          "targets": [{ "expr": "count(kube_pod_status_phase{phase=\"Running\"})", "legendFormat": "Running" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } }
+        },
+        {
+          "title": "Failed Pods",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+          "targets": [{ "expr": "count(kube_pod_status_phase{phase=\"Failed\"}) or vector(0)", "legendFormat": "Failed" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "red" } } }
+        },
+        {
+          "title": "Pending Pods",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "targets": [{ "expr": "count(kube_pod_status_phase{phase=\"Pending\"}) or vector(0)", "legendFormat": "Pending" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } } }
+        },
+        {
+          "title": "Namespaces",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 5 },
+          "targets": [{ "expr": "count(kube_namespace_created)", "legendFormat": "Namespaces" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Deployments",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 5 },
+          "targets": [{ "expr": "count(kube_deployment_created)", "legendFormat": "Deployments" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "DaemonSets",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 5 },
+          "targets": [{ "expr": "count(kube_daemonset_created)", "legendFormat": "DaemonSets" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Services",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 5 },
+          "targets": [{ "expr": "count(kube_service_info)", "legendFormat": "Services" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "PVCs",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 5 },
+          "targets": [{ "expr": "count(kube_persistentvolumeclaim_info) or vector(0)", "legendFormat": "PVCs" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Container Restarts (last 1h)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 5 },
+          "targets": [{ "expr": "sum(increase(kube_pod_container_status_restarts_total[1h]))", "legendFormat": "Restarts" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [{"color": "green", "value": 0}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}] } } }
+        },
+        {
+          "title": "Node Resources",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+          "collapsed": false
+        },
+        {
+          "title": "CPU Usage per Node (%)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+          "targets": [{ "expr": "100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "{% raw %}{{ instance }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+        },
+        {
+          "title": "Memory Usage per Node (%)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+          "targets": [{ "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100", "legendFormat": "{% raw %}{{ instance }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+        },
+        {
+          "title": "Disk Usage per Node (%)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+          "targets": [{ "expr": "(1 - node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100", "legendFormat": "{% raw %}{{ instance }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+        },
+        {
+          "title": "System Load (1m avg)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+          "targets": [{ "expr": "node_load1", "legendFormat": "{% raw %}{{ instance }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Network I/O",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+          "collapsed": false
+        },
+        {
+          "title": "Network Receive (bytes/s)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+          "targets": [{ "expr": "rate(node_network_receive_bytes_total{device!~\"lo|veth.*|flannel.*|cni.*\"}[5m])", "legendFormat": "{% raw %}{{ instance }} {{ device }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "Bps" } }
+        },
+        {
+          "title": "Network Transmit (bytes/s)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+          "targets": [{ "expr": "rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|flannel.*|cni.*\"}[5m])", "legendFormat": "{% raw %}{{ instance }} {{ device }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "Bps" } }
+        },
+        {
+          "title": "Network Errors",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+          "targets": [
+            { "expr": "rate(node_network_receive_errs_total[5m])", "legendFormat": "{% raw %}RX err {{ instance }}{% endraw %}" },
+            { "expr": "rate(node_network_transmit_errs_total[5m])", "legendFormat": "{% raw %}TX err {{ instance }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Network Packets Dropped",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+          "targets": [
+            { "expr": "rate(node_network_receive_drop_total[5m])", "legendFormat": "{% raw %}RX drop {{ instance }}{% endraw %}" },
+            { "expr": "rate(node_network_transmit_drop_total[5m])", "legendFormat": "{% raw %}TX drop {{ instance }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Pod / Container Metrics",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 },
+          "collapsed": false
+        },
+        {
+          "title": "Container CPU Usage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+          "targets": [{ "expr": "sum by(pod) (rate(container_cpu_usage_seconds_total{container!=\"\",container!=\"POD\"}[5m]))", "legendFormat": "{% raw %}{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "title": "Container Memory Usage",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+          "targets": [{ "expr": "sum by(pod) (container_memory_working_set_bytes{container!=\"\",container!=\"POD\"})", "legendFormat": "{% raw %}{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "Pods by Namespace",
+          "type": "piechart",
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 52 },
+          "targets": [{ "expr": "count by(namespace) (kube_pod_info)", "legendFormat": "{% raw %}{{ namespace }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Pod Phase Distribution",
+          "type": "piechart",
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 52 },
+          "targets": [{ "expr": "count by(phase) (kube_pod_status_phase == 1)", "legendFormat": "{% raw %}{{ phase }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Deployment Replicas Available",
+          "type": "table",
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 52 },
+          "targets": [{ "expr": "kube_deployment_status_replicas_available", "format": "table", "instant": true }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Disk I/O per Node",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+          "collapsed": false
+        },
+        {
+          "title": "Disk Read (bytes/s)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+          "targets": [{ "expr": "rate(node_disk_read_bytes_total[5m])", "legendFormat": "{% raw %}{{ instance }} {{ device }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "Bps" } }
+        },
+        {
+          "title": "Disk Write (bytes/s)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+          "targets": [{ "expr": "rate(node_disk_written_bytes_total[5m])", "legendFormat": "{% raw %}{{ instance }} {{ device }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "Bps" } }
+        },
+        {
+          "title": "Pod Status Table",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 69 },
+          "collapsed": false
+        },
+        {
+          "title": "All Pods (status)",
+          "type": "table",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 70 },
+          "targets": [{ "expr": "kube_pod_status_phase", "format": "table", "instant": true }],
+          "datasource": "Prometheus"
+        }
+      ],
+      "schemaVersion": 39,
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" }
+    }
+  openstack.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "title": "OpenStack Infrastructure",
+      "uid": "openstack-infra",
+      "panels": [
+        {
+          "title": "Service Status",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "title": "OpenStack Exporter",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "targets": [{ "expr": "up{job=\"openstack\"}", "legendFormat": "Exporter" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Gnocchi Exporter",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+          "targets": [{ "expr": "up{job=\"gnocchi\"}", "legendFormat": "Gnocchi" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Total VMs",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+          "targets": [{ "expr": "openstack_nova_total_vms", "legendFormat": "VMs" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Running VMs",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+          "targets": [{ "expr": "openstack_nova_running_vms", "legendFormat": "Running" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } } }
+        },
+        {
+          "title": "Compute Agents",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+          "targets": [{ "expr": "openstack_nova_agent_state{service=\"nova-compute\"}", "legendFormat": "{% raw %}{{ hostname }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Neutron Agents",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "targets": [{ "expr": "openstack_neutron_agent_state", "legendFormat": "{% raw %}{{ hostname }}-{{ service }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Nova Quotas & Resources",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "title": "vCPUs Used vs Max",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [
+            { "expr": "openstack_nova_limits_vcpus_used", "legendFormat": "{% raw %}Used {{ tenant }}{% endraw %}" },
+            { "expr": "openstack_nova_limits_vcpus_max", "legendFormat": "{% raw %}Max {{ tenant }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "RAM Used vs Max (MB)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [
+            { "expr": "openstack_nova_limits_memory_used", "legendFormat": "{% raw %}Used {{ tenant }}{% endraw %}" },
+            { "expr": "openstack_nova_limits_memory_max", "legendFormat": "{% raw %}Max {{ tenant }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+        },
+        {
+          "title": "Instances Used vs Max",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "targets": [
+            { "expr": "openstack_nova_limits_instances_used", "legendFormat": "{% raw %}Used {{ tenant }}{% endraw %}" },
+            { "expr": "openstack_nova_limits_instances_max", "legendFormat": "{% raw %}Max {{ tenant }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Nova Server Local Disk (GB)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "targets": [{ "expr": "openstack_nova_server_local_gb", "legendFormat": "{% raw %}{{ name }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "decgbytes" } }
+        },
+        {
+          "title": "Networking",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "collapsed": false
+        },
+        {
+          "title": "Networks",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_networks", "legendFormat": "Networks" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Subnets",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_subnets", "legendFormat": "Subnets" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Routers",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_routers", "legendFormat": "Routers" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Ports",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_ports", "legendFormat": "Ports" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Floating IPs",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_floating_ips", "legendFormat": "Floating IPs" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Security Groups",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 23 },
+          "targets": [{ "expr": "openstack_neutron_security_groups", "legendFormat": "Sec Groups" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Cinder Storage",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+          "collapsed": false
+        },
+        {
+          "title": "Volumes",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 28 },
+          "targets": [{ "expr": "openstack_cinder_volumes", "legendFormat": "Volumes" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Volume Size (GB)",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 28 },
+          "targets": [{ "expr": "openstack_cinder_volume_size_gb", "legendFormat": "{% raw %}{{ name }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "decgbytes" } }
+        },
+        {
+          "title": "Volume Status",
+          "type": "table",
+          "gridPos": { "h": 6, "w": 8, "x": 8, "y": 28 },
+          "targets": [{ "expr": "openstack_cinder_volume_status", "format": "table", "instant": true }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Snapshots",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 28 },
+          "targets": [{ "expr": "openstack_cinder_snapshots", "legendFormat": "Snapshots" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Cinder Agent State",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 28 },
+          "targets": [{ "expr": "openstack_cinder_agent_state", "legendFormat": "{% raw %}{{ hostname }}-{{ service }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Glance Images",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+          "collapsed": false
+        },
+        {
+          "title": "Total Images",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 35 },
+          "targets": [{ "expr": "openstack_glance_images", "legendFormat": "Images" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Image Sizes",
+          "type": "table",
+          "gridPos": { "h": 6, "w": 18, "x": 6, "y": 35 },
+          "targets": [{ "expr": "openstack_glance_image_bytes", "format": "table", "instant": true }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Keystone",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 },
+          "collapsed": false
+        },
+        {
+          "title": "Projects",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 42 },
+          "targets": [{ "expr": "openstack_identity_projects", "legendFormat": "Projects" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Users",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 42 },
+          "targets": [{ "expr": "openstack_identity_users", "legendFormat": "Users" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Domains",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 42 },
+          "targets": [{ "expr": "openstack_identity_domains", "legendFormat": "Domains" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Regions",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 42 },
+          "targets": [{ "expr": "openstack_identity_regions", "legendFormat": "Regions" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Ceilometer / Gnocchi Telemetry",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 },
+          "collapsed": false
+        },
+        {
+          "title": "VM CPU Time (ns)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 47 },
+          "targets": [{ "expr": "ceilometer_cpu", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "ns" } }
+        },
+        {
+          "title": "VM Memory Usage (MB)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 47 },
+          "targets": [
+            { "expr": "ceilometer_memory", "legendFormat": "{% raw %}Total {{ resource_id }}{% endraw %}" },
+            { "expr": "ceilometer_memory_usage", "legendFormat": "{% raw %}Used {{ resource_id }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "decmbytes" } }
+        },
+        {
+          "title": "VM Disk Read (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 55 },
+          "targets": [{ "expr": "ceilometer_disk_device_read_bytes", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "VM Disk Write (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 55 },
+          "targets": [{ "expr": "ceilometer_disk_device_write_bytes", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "VM Disk Read Requests",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 63 },
+          "targets": [{ "expr": "ceilometer_disk_device_read_requests", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "VM Disk Write Requests",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 63 },
+          "targets": [{ "expr": "ceilometer_disk_device_write_requests", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "VM Network Incoming (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 71 },
+          "targets": [{ "expr": "ceilometer_network_incoming_bytes", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "VM Network Outgoing (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 71 },
+          "targets": [{ "expr": "ceilometer_network_outgoing_bytes", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "VM Network Incoming (packets)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 79 },
+          "targets": [{ "expr": "ceilometer_network_incoming_packets", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "VM Network Outgoing (packets)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 79 },
+          "targets": [{ "expr": "ceilometer_network_outgoing_packets", "legendFormat": "{% raw %}{{ resource_id }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Image Downloads / Serves",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 87 },
+          "targets": [
+            { "expr": "ceilometer_image_download", "legendFormat": "{% raw %}Download {{ resource_id }}{% endraw %}" },
+            { "expr": "ceilometer_image_serve", "legendFormat": "{% raw %}Serve {{ resource_id }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "Object Storage I/O (bytes)",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 87 },
+          "targets": [
+            { "expr": "ceilometer_storage_objects_incoming_bytes", "legendFormat": "{% raw %}Incoming {{ resource_id }}{% endraw %}" },
+            { "expr": "ceilometer_storage_objects_outgoing_bytes", "legendFormat": "{% raw %}Outgoing {{ resource_id }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "bytes" } }
+        },
+        {
+          "title": "Nova Server Status Table",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 95 },
+          "collapsed": false
+        },
+        {
+          "title": "All Servers (status)",
+          "type": "table",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 96 },
+          "targets": [{ "expr": "openstack_nova_server_status", "format": "table", "instant": true }],
+          "datasource": "Prometheus"
+        }
+      ],
+      "schemaVersion": 39,
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" }
+    }
+  predictions.json: |
+    {
+      "title": "Pod Predictions (ML Forecasting)",
+      "uid": "pod-predictions",
+      "editable": true,
+      "panels": [
+        {
+          "title": "Prediction Overview",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "title": "Prediction Exporter Status",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "targets": [{ "expr": "up{job=\"prediction-exporter\"}", "legendFormat": "Exporter" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}] } }
+        },
+        {
+          "title": "Prediction Horizon",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+          "targets": [{ "expr": "pod_prediction_horizon_minutes", "legendFormat": "Minutes" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "min" } }
+        },
+        {
+          "title": "Pods Being Predicted",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+          "targets": [{ "expr": "count(pod_predicted_cpu_mean)", "legendFormat": "Count" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Active Recommendations",
+          "type": "stat",
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+          "targets": [{ "expr": "count(pod_recommendation)", "legendFormat": "Count" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "yellow"}, {"value": 3, "color": "red"}] } } }
+        },
+        {
+          "title": "Avg CPU Prediction Confidence",
+          "type": "gauge",
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+          "targets": [{ "expr": "avg(pod_prediction_confidence{metric=\"cpu\"})", "legendFormat": "CPU" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [{"value": 0, "color": "red"}, {"value": 0.5, "color": "yellow"}, {"value": 0.7, "color": "green"}] } } }
+        },
+        {
+          "title": "Avg Memory Prediction Confidence",
+          "type": "gauge",
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "targets": [{ "expr": "avg(pod_prediction_confidence{metric=\"memory\"})", "legendFormat": "Memory" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [{"value": 0, "color": "red"}, {"value": 0.5, "color": "yellow"}, {"value": 0.7, "color": "green"}] } } }
+        },
+        {
+          "title": "CPU Predictions",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "title": "Predicted CPU Mean per Pod",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [{ "expr": "pod_predicted_cpu_mean", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 } } }
+        },
+        {
+          "title": "Predicted CPU Peak per Pod",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [{ "expr": "pod_predicted_cpu_max", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 }, "thresholds": { "mode": "absolute", "steps": [{"value": 0, "color": "green"}, {"value": 0.8, "color": "red"}]} } }
+        },
+        {
+          "title": "CPU Prediction Confidence per Pod",
+          "type": "bargauge",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "targets": [{ "expr": "pod_prediction_confidence{metric=\"cpu\"}", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [{"value": 0, "color": "red"}, {"value": 0.5, "color": "yellow"}, {"value": 0.7, "color": "green"}] } } }
+        },
+        {
+          "title": "Actual vs Predicted CPU",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "targets": [
+            { "expr": "pod_predicted_cpu_mean", "legendFormat": "{% raw %}Predicted {{ pod }}{% endraw %}" },
+            { "expr": "rate(container_cpu_usage_seconds_total{container!=\"\",container!=\"POD\"}[5m])", "legendFormat": "{% raw %}Actual {{ pod }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 } } }
+        },
+        {
+          "title": "Memory Predictions",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "collapsed": false
+        },
+        {
+          "title": "Predicted Memory Mean per Pod",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "targets": [{ "expr": "pod_predicted_memory_mean", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 } } }
+        },
+        {
+          "title": "Predicted Memory Peak per Pod",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "targets": [{ "expr": "pod_predicted_memory_max", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 }, "thresholds": { "mode": "absolute", "steps": [{"value": 0, "color": "green"}, {"value": 0.85, "color": "red"}]} } }
+        },
+        {
+          "title": "Memory Prediction Confidence per Pod",
+          "type": "bargauge",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+          "targets": [{ "expr": "pod_prediction_confidence{metric=\"memory\"}", "legendFormat": "{% raw %}{{ namespace }}/{{ pod }}{% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [{"value": 0, "color": "red"}, {"value": 0.5, "color": "yellow"}, {"value": 0.7, "color": "green"}] } } }
+        },
+        {
+          "title": "Actual vs Predicted Memory",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+          "targets": [
+            { "expr": "pod_predicted_memory_mean", "legendFormat": "{% raw %}Predicted {{ pod }}{% endraw %}" },
+            { "expr": "container_memory_working_set_bytes{container!=\"\",container!=\"POD\"} / 1073741824", "legendFormat": "{% raw %}Actual {{ pod }}{% endraw %}" }
+          ],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 } } }
+        },
+        {
+          "title": "Recommendations",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+          "collapsed": false
+        },
+        {
+          "title": "Active Recommendations",
+          "type": "table",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+          "targets": [{ "expr": "pod_recommendation", "format": "table", "instant": true }],
+          "datasource": "Prometheus",
+          "transformations": [
+            { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "instance": true, "job": true }, "renameByName": { "namespace": "Namespace", "pod": "Pod", "type": "Recommendation", "Value": "Confidence" } } }
+          ]
+        },
+        {
+          "title": "Recommendations by Type",
+          "type": "piechart",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+          "targets": [{ "expr": "count by (type) (pod_recommendation)", "legendFormat": "{% raw %}{{ type }}{% endraw %}" }],
+          "datasource": "Prometheus"
+        },
+        {
+          "title": "Recommendation Confidence",
+          "type": "bargauge",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+          "targets": [{ "expr": "pod_recommendation", "legendFormat": "{% raw %}{{ pod }} ({{ type }}){% endraw %}" }],
+          "datasource": "Prometheus",
+          "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit", "thresholds": { "steps": [{"value": 0, "color": "blue"}, {"value": 0.5, "color": "yellow"}, {"value": 0.8, "color": "red"}] } } }
+        }
+      ],
+      "schemaVersion": 39,
+      "templating": { "list": [] },
+      "time": { "from": "now-1h", "to": "now" }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        runAsUser: 472
+        runAsGroup: 472
+        fsGroup: 472
+        runAsNonRoot: true
+      containers:
+        - name: grafana
+          image: {{ grafana_image }}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "{{ grafana_admin_user }}"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "{{ grafana_admin_password }}"
+            - name: GF_SMTP_ENABLED
+              value: "{{ grafana_smtp_enabled | lower }}"
+            - name: GF_SMTP_HOST
+              value: "{{ grafana_smtp_host }}:{{ grafana_smtp_port }}"
+            - name: GF_SMTP_USER
+              value: "{{ grafana_smtp_user }}"
+            - name: GF_SMTP_PASSWORD
+              value: "{{ grafana_smtp_password }}"
+            - name: GF_SMTP_FROM_ADDRESS
+              value: "{{ grafana_smtp_from_address }}"
+            - name: GF_SMTP_FROM_NAME
+              value: "{{ grafana_smtp_from_name }}"
+            - name: GF_SMTP_SKIP_VERIFY
+              value: "{{ grafana_smtp_skip_verify | lower }}"
+            - name: GF_SMTP_STARTTLS_POLICY
+              value: "{{ grafana_smtp_starttls_policy }}"
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboards-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboards-provider
+          configMap:
+            name: grafana-dashboards-provider
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: {{ monitoring_namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: {{ grafana_nodeport }}

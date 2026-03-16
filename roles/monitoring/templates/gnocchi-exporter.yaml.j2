@@ -1,0 +1,304 @@
+---
+# ── Gnocchi / Ceilometer Exporter ──
+# Queries the Gnocchi API for all Ceilometer telemetry metrics
+# and exposes them as Prometheus-compatible metrics.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gnocchi-exporter-script
+  namespace: {{ monitoring_namespace }}
+data:
+  exporter.py: |
+{% raw %}
+    #!/usr/bin/env python3
+    """Gnocchi/Ceilometer → Prometheus exporter.
+
+    Queries the Gnocchi API for every Ceilometer metric and exposes
+    the latest measure as a Prometheus gauge.
+    """
+
+    import os, sys, time, logging, re, json
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError
+    from urllib.parse import urlencode
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("gnocchi-exporter")
+
+    # ── Configuration from environment ──────────────────────────────
+    AUTH_URL       = os.environ.get("OS_AUTH_URL", "http://controller:5000/v3")
+    USERNAME       = os.environ.get("OS_USERNAME", "admin")
+    PASSWORD       = os.environ.get("OS_PASSWORD", "")
+    PROJECT_NAME   = os.environ.get("OS_PROJECT_NAME", "admin")
+    USER_DOMAIN    = os.environ.get("OS_USER_DOMAIN_NAME", "Default")
+    PROJECT_DOMAIN = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
+    GNOCCHI_URL    = os.environ.get("GNOCCHI_URL", "http://controller:8041")
+    PORT           = int(os.environ.get("LISTEN_PORT", "9275"))
+    INTERVAL       = int(os.environ.get("CACHE_TTL", "55"))
+
+    # All Ceilometer metric names we want to export
+    METRIC_NAMES = [
+        "cpu",
+        "memory",
+        "memory.usage",
+        "vcpus",
+        "disk.root.size",
+        "disk.ephemeral.size",
+        "disk.device.read.bytes",
+        "disk.device.write.bytes",
+        "disk.device.read.requests",
+        "disk.device.write.requests",
+        "network.incoming.bytes",
+        "network.outgoing.bytes",
+        "network.incoming.packets",
+        "network.outgoing.packets",
+        "image.download",
+        "image.serve",
+        "storage.objects.incoming.bytes",
+        "storage.objects.outgoing.bytes",
+        "power.state",
+    ]
+
+    # ── Keystone token cache ────────────────────────────────────────
+    _token = None
+    _token_expires = 0
+
+    def _http(url, data=None, headers=None, method=None):
+        """Tiny helper around urllib."""
+        if headers is None:
+            headers = {}
+        if data is not None and isinstance(data, (dict, list)):
+            data = json.dumps(data).encode()
+            headers.setdefault("Content-Type", "application/json")
+        req = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(req, timeout=20) as resp:
+                body = resp.read().decode()
+                return resp.status, resp.headers, json.loads(body) if body else {}
+        except URLError as exc:
+            log.error("HTTP error %s : %s", url, exc)
+            return 0, {}, {}
+
+    def get_token():
+        """Obtain (or reuse) a Keystone v3 auth token."""
+        global _token, _token_expires
+        now = time.time()
+        if _token and now < _token_expires - 60:
+            return _token
+
+        auth_body = {
+            "auth": {
+                "identity": {
+                    "methods": ["password"],
+                    "password": {
+                        "user": {
+                            "name": USERNAME,
+                            "domain": {"name": USER_DOMAIN},
+                            "password": PASSWORD,
+                        }
+                    },
+                },
+                "scope": {
+                    "project": {
+                        "name": PROJECT_NAME,
+                        "domain": {"name": PROJECT_DOMAIN},
+                    }
+                },
+            }
+        }
+        status, hdrs, _ = _http(AUTH_URL + "/auth/tokens", data=auth_body)
+        if status in (200, 201):
+            _token = hdrs.get("X-Subject-Token")
+            _token_expires = now + 3500        # ~1 h safety
+            log.info("Keystone token obtained")
+        else:
+            log.error("Keystone auth failed (status=%s)", status)
+            _token = None
+        return _token
+
+    # ── Metric scrape ───────────────────────────────────────────────
+    _cache = ""
+    _cache_ts = 0
+
+    def _prom_name(ceilometer_name):
+        """Convert a Ceilometer metric name to a valid Prometheus metric name."""
+        return "ceilometer_" + re.sub(r"[^a-zA-Z0-9_]", "_", ceilometer_name)
+
+    def scrape_gnocchi():
+        """Query Gnocchi for every metric and build Prometheus text output."""
+        global _cache, _cache_ts
+        now = time.time()
+        if _cache and now - _cache_ts < INTERVAL:
+            return _cache
+
+        token = get_token()
+        if not token:
+            return "# ERROR: no Keystone token\n"
+
+        hdrs = {"X-Auth-Token": token}
+        lines = []
+        lines.append("# Gnocchi / Ceilometer metrics")
+
+        # Fetch all metrics from Gnocchi (paginated)
+        all_metrics = []
+        url = GNOCCHI_URL + "/v1/metric?limit=500"
+        while url:
+            status, _, body = _http(url, headers=hdrs)
+            if status != 200 or not isinstance(body, list):
+                log.warning("Failed to list metrics: status=%s", status)
+                break
+            all_metrics.extend(body)
+            # simple pagination: if we got 500, try next page
+            if len(body) >= 500 and body:
+                last_id = body[-1].get("id", "")
+                url = GNOCCHI_URL + "/v1/metric?limit=500&marker=" + last_id
+            else:
+                url = None
+
+        log.info("Fetched %d metrics from Gnocchi", len(all_metrics))
+
+        # Group metrics by name
+        by_name = {}
+        for m in all_metrics:
+            name = m.get("name", "")
+            if name in METRIC_NAMES:
+                by_name.setdefault(name, []).append(m)
+
+        # For each metric group, fetch latest measure
+        for ceilometer_name, metrics in by_name.items():
+            pname = _prom_name(ceilometer_name)
+            unit = ""
+            lines.append(f"# HELP {pname} Ceilometer {ceilometer_name}")
+            lines.append(f"# TYPE {pname} gauge")
+
+            for m in metrics:
+                metric_id = m.get("id", "")
+                resource_id = m.get("resource_id", "unknown")
+                unit = m.get("unit", "")
+
+                # Fetch latest measure
+                murl = GNOCCHI_URL + f"/v1/metric/{metric_id}/measures?limit=1&sort=timestamp:desc"
+                status2, _, measures = _http(murl, headers=hdrs)
+                if status2 == 200 and isinstance(measures, list) and measures:
+                    # measures is [[timestamp, granularity, value], ...]
+                    value = measures[0][2] if len(measures[0]) >= 3 else 0
+                    labels = f'resource_id="{resource_id}",unit="{unit}"'
+                    lines.append(f'{pname}{{{labels}}} {value}')
+
+        # Also expose a simple up metric
+        lines.append("# HELP gnocchi_exporter_up Whether the exporter is up")
+        lines.append("# TYPE gnocchi_exporter_up gauge")
+        lines.append("gnocchi_exporter_up 1")
+        lines.append("")
+
+        _cache = "\n".join(lines) + "\n"
+        _cache_ts = now
+        return _cache
+
+    # ── HTTP handler ────────────────────────────────────────────────
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/metrics":
+                body = scrape_gnocchi().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == "/health":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK\n")
+            else:
+                self.send_response(404)
+                self.end_headers()
+        def log_message(self, fmt, *args):
+            pass
+
+    if __name__ == "__main__":
+        log.info("Starting Gnocchi exporter on :%d", PORT)
+        HTTPServer(("", PORT), Handler).serve_forever()
+{% endraw %}
+
+  requirements.txt: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gnocchi-exporter
+  namespace: {{ monitoring_namespace }}
+  labels:
+    app: gnocchi-exporter
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 1800
+  selector:
+    matchLabels:
+      app: gnocchi-exporter
+  template:
+    metadata:
+      labels:
+        app: gnocchi-exporter
+    spec:
+      hostAliases:
+        - ip: "{{ controller_ip }}"
+          hostnames:
+            - controller
+      containers:
+        - name: gnocchi-exporter
+          image: python:3.11-slim
+          command: ["python3", "/app/exporter.py"]
+          ports:
+            - containerPort: 9275
+          env:
+            - name: OS_AUTH_URL
+              value: "{{ keystone_url }}"
+            - name: OS_USERNAME
+              value: "{{ os_username }}"
+            - name: OS_PASSWORD
+              value: "{{ os_password }}"
+            - name: OS_PROJECT_NAME
+              value: "{{ os_project_name }}"
+            - name: OS_USER_DOMAIN_NAME
+              value: "{{ os_user_domain_name }}"
+            - name: OS_PROJECT_DOMAIN_NAME
+              value: "{{ os_project_domain_name }}"
+            - name: GNOCCHI_URL
+              value: "{{ gnocchi_url }}"
+            - name: LISTEN_PORT
+              value: "9275"
+            - name: CACHE_TTL
+              value: "55"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9275
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9275
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: gnocchi-exporter-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gnocchi-exporter
+  namespace: {{ monitoring_namespace }}
+spec:
+  selector:
+    app: gnocchi-exporter
+  ports:
+    - name: metrics
+      port: 9275
+      targetPort: 9275

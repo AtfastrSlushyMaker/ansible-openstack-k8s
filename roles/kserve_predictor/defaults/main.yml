@@ -1,0 +1,33 @@
+---
+# ── KServe Predictor Role Defaults ──
+
+# Namespace where the predictor will be deployed
+predictor_namespace: monitoring
+
+# Container image (built from the Dockerfile in files/)
+predictor_image: "kserve-pod-predictor:latest"
+
+# NodePort for external access to the prediction API
+predictor_nodeport: 32010
+
+# ── Prediction Configuration ──
+# How many minutes ahead to forecast
+prediction_horizon_minutes: "30"
+
+# CPU threshold (0-1 fraction) — above this, recommend scale-up
+cpu_high_threshold: "0.80"
+
+# CPU threshold — below this, recommend scale-down
+cpu_low_threshold: "0.10"
+
+# Memory threshold (0-1 fraction) — above this, recommend increase
+memory_high_threshold: "0.85"
+
+# Memory threshold — below this, recommend decrease
+memory_low_threshold: "0.10"
+
+# Confidence threshold for recommendations (0-1)
+confidence_threshold: "0.70"
+
+# Log level (DEBUG, INFO, WARNING, ERROR)
+log_level: "INFO"

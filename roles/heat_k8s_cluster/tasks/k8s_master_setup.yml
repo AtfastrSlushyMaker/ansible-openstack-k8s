@@ -1,0 +1,122 @@
+---
+- name: Check if Kubernetes API is responding
+  ansible.builtin.command: kubectl get nodes
+  register: kube_api_check
+  failed_when: false
+  changed_when: false
+
+- name: Clean up previous failed attempts
+  become: true
+  ansible.builtin.command: kubeadm reset -f
+  when: kube_api_check.rc != 0
+
+- name: Apply OpenStack Network Workarounds (MTU)
+  become: true
+  ansible.builtin.shell: |
+    for iface in $(ls /sys/class/net/ | grep -v lo); do
+      ip link set dev "$iface" mtu 1300 2>/dev/null || true
+    done
+  when: kube_api_check.rc != 0
+  changed_when: true
+
+- name: Pre-pull images
+  become: true
+  ansible.builtin.command: kubeadm config images pull
+  when: kube_api_check.rc != 0
+
+- name: Create kubeadm configuration file
+  become: true
+  ansible.builtin.copy:
+    dest: /tmp/kubeadm-config.yaml
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: InitConfiguration
+      localAPIEndpoint:
+        advertiseAddress: {{ ansible_default_ipv4.address }}
+        bindPort: 6443
+      nodeRegistration:
+        criSocket: unix:///var/run/containerd/containerd.sock
+        imagePullPolicy: IfNotPresent
+        name: "{{ ansible_hostname | replace('_', '-') }}"
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      networking:
+        podSubnet: 10.244.0.0/16
+      apiServer:
+        certSANs:
+          - "{{ ansible_host }}"
+          - "{{ ansible_default_ipv4.address }}"
+      ---
+      apiVersion: kubelet.config.k8s.io/v1beta1
+      kind: KubeletConfiguration
+      cgroupDriver: systemd
+  when: kube_api_check.rc != 0
+
+- name: Initialize Kubernetes Cluster
+  become: true
+  ansible.builtin.command:
+    cmd: kubeadm init --config /tmp/kubeadm-config.yaml --ignore-preflight-errors=all
+  register: kubeadm_init
+  when: kube_api_check.rc != 0
+
+- name: Wait for API server to settle (Prevents SSH Timeout)
+  ansible.builtin.pause:
+    seconds: 20
+  when: kubeadm_init.changed
+
+- name: Create .kube directory
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    mode: "0755"
+    owner: "{{ ansible_user }}"
+
+- name: Copy admin.conf to user's kube config
+  become: true
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    remote_src: yes
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  when: kubeadm_init.changed or kube_api_check.rc != 0
+
+# --- NEW: Wait for API server to be fully responsive before applying network plugin ---
+- name: Wait for API server to be responsive
+  become: true
+  ansible.builtin.shell: |
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes
+  register: api_ready
+  until: api_ready is success
+  retries: 10
+  delay: 5
+  changed_when: false
+
+# --- NEW: Install Flannel with explicit kubeconfig and retries ---
+- name: Install Flannel Network Plugin
+  become: true
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://github.com/flannel-io/flannel/releases/download/v0.26.1/kube-flannel.yml
+  register: flannel_result
+  until: flannel_result is success
+  retries: 5
+  delay: 10
+
+# --- NEW: Patch Flannel MTU (also use kubeconfig) ---
+- name: Patch Flannel MTU for OpenStack stability
+  become: true
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf patch configmap kube-flannel-cfg -n kube-flannel --type merge 
+    -p '{"data":{"net-conf.json":"{ \"Network\": \"10.244.0.0/16\", \"Backend\": { \"Type\": \"vxlan\", \"MTU\": 1250 } }"}}'
+  when: flannel_result.changed # Only patch if flannel was just installed
+
+- name: Generate Join Command
+  become: true
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: join_command_raw
+
+- name: Set Join Command as a global fact
+  ansible.builtin.set_fact:
+    k8s_join_command: "{{ join_command_raw.stdout }}"
+  run_once: true

@@ -1,0 +1,174 @@
+---
+# ── monitoring/tasks/main.yml ──
+# Deploys Prometheus + Grafana + exporters into K8s
+# Must run on: master_node (with kubectl access)
+# None of these tasks need root, so we disable become to avoid
+# sudo-prompt timeouts on long-running kubectl waits.
+
+- name: Deploy monitoring stack (no become)
+  become: false
+  vars:
+    ansible_become: false
+  block:
+    - name: Ensure monitoring manifest directory exists
+      ansible.builtin.file:
+        path: /home/{{ ansible_user }}/monitoring
+        state: directory
+        mode: "0755"
+
+    - name: Render monitoring namespace manifest
+      ansible.builtin.template:
+        src: namespace.yaml.j2
+        dest: /home/{{ ansible_user }}/monitoring/namespace.yaml
+        mode: "0644"
+
+    - name: Create monitoring namespace
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        apply -f /home/{{ ansible_user }}/monitoring/namespace.yaml
+      register: ns_result
+      changed_when: "'created' in ns_result.stdout or 'configured' in ns_result.stdout"
+
+    - name: Render exporters manifest (node-exporter + kube-state-metrics)
+      ansible.builtin.template:
+        src: exporters.yaml.j2
+        dest: /home/{{ ansible_user }}/monitoring/exporters.yaml
+        mode: "0644"
+
+    - name: Apply exporters
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        apply -f /home/{{ ansible_user }}/monitoring/exporters.yaml
+      register: exp_result
+      changed_when: "'created' in exp_result.stdout or 'configured' in exp_result.stdout"
+
+    - name: Render Prometheus manifest
+      ansible.builtin.template:
+        src: prometheus.yaml.j2
+        dest: /home/{{ ansible_user }}/monitoring/prometheus.yaml
+        mode: "0644"
+
+    - name: Apply Prometheus
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        apply -f /home/{{ ansible_user }}/monitoring/prometheus.yaml
+      register: prom_result
+      changed_when: "'created' in prom_result.stdout or 'configured' in prom_result.stdout"
+
+    - name: Render Gnocchi exporter manifest
+      ansible.builtin.template:
+        src: gnocchi-exporter.yaml.j2
+        dest: /home/{{ ansible_user }}/monitoring/gnocchi-exporter.yaml
+        mode: "0644"
+
+    - name: Apply Gnocchi exporter
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        apply -f /home/{{ ansible_user }}/monitoring/gnocchi-exporter.yaml
+      register: gnocchi_result
+      changed_when: "'created' in gnocchi_result.stdout or 'configured' in gnocchi_result.stdout"
+
+    - name: Render Grafana manifest
+      ansible.builtin.template:
+        src: grafana.yaml.j2
+        dest: /home/{{ ansible_user }}/monitoring/grafana.yaml
+        mode: "0644"
+
+    - name: Apply Grafana
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        apply -f /home/{{ ansible_user }}/monitoring/grafana.yaml
+      register: graf_result
+      changed_when: "'created' in graf_result.stdout or 'configured' in graf_result.stdout"
+
+    - name: Restart Grafana to pick up ConfigMap changes
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }}
+        rollout restart deployment/grafana
+      changed_when: false
+
+    - name: Wait for Prometheus deployment to be ready
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }}
+        rollout status deployment/prometheus --timeout=1800s
+      changed_when: false
+
+    - name: Wait for Grafana deployment to be ready
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }}
+        rollout status deployment/grafana --timeout=1800s
+      changed_when: false
+
+    - name: Wait for OpenStack exporter (non-blocking)
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }}
+        rollout status deployment/openstack-exporter --timeout=180s
+      changed_when: false
+      failed_when: false
+      register: os_exporter_rollout
+
+    - name: Wait for Gnocchi exporter (non-blocking)
+      ansible.builtin.command: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }}
+        rollout status deployment/gnocchi-exporter --timeout=180s
+      changed_when: false
+      failed_when: false
+      register: gnocchi_exporter_rollout
+
+    - name: Warn if OpenStack exporter failed
+      ansible.builtin.debug:
+        msg: "WARNING: OpenStack exporter did not start. Check image pull and connectivity to Keystone from pods."
+      when: os_exporter_rollout.rc != 0
+
+    - name: Warn if Gnocchi exporter failed
+      ansible.builtin.debug:
+        msg: "WARNING: Gnocchi exporter did not start. Check connectivity to Gnocchi/Keystone from pods."
+      when: gnocchi_exporter_rollout.rc != 0
+
+    - name: Show monitoring URLs
+      ansible.builtin.debug:
+        msg:
+          prometheus: "http://{{ hostvars['localhost'].master_fip }}:{{ prometheus_nodeport }}"
+          grafana: "http://{{ hostvars['localhost'].master_fip }}:{{ grafana_nodeport }}"
+          grafana_login: "{{ grafana_admin_user }} / {{ grafana_admin_password }}"
+
+  rescue:
+    - name: "[DIAG] Collect pod status in monitoring namespace"
+      ansible.builtin.shell: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }} get pods -o wide 2>&1
+      register: diag_pods
+      changed_when: false
+      failed_when: false
+
+    - name: "[DIAG] Describe failing pods"
+      ansible.builtin.shell: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }} describe pods 2>&1 | tail -120
+      register: diag_describe
+      changed_when: false
+      failed_when: false
+
+    - name: "[DIAG] Recent events in monitoring namespace"
+      ansible.builtin.shell: >
+        kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+        -n {{ monitoring_namespace }} get events --sort-by='.lastTimestamp' 2>&1 | tail -40
+      register: diag_events
+      changed_when: false
+      failed_when: false
+
+    - name: Show diagnostics
+      ansible.builtin.debug:
+        msg:
+          pods: "{{ diag_pods.stdout_lines | default([]) }}"
+          events: "{{ diag_events.stdout_lines | default([]) }}"
+          describe_tail: "{{ diag_describe.stdout_lines | default([]) }}"
+
+    - name: Fail with clear message
+      ansible.builtin.fail:
+        msg: "Monitoring deployment failed. See diagnostics above."

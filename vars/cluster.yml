@@ -1,0 +1,28 @@
+---
+stack_name: "k8s-cluster"
+image: "Ubuntu-24.04"
+flavor_master: "ubuntu-k8s-2c-4g"
+flavor_worker: "ubuntu-small"
+keypair_name: "k8s-cluster-key-heat"
+keypair_public_key_path: "/root/.ssh/id_ed25519.pub"
+security_groups:
+  - "dev-frontend-secgroup"
+nodeport_range_start: 30000
+nodeport_range_end: 32767
+nodeport_remote_cidr: "0.0.0.0/0"
+network: "frontend-net"
+subnet: "frontend-subnet"
+floatingip_network: "provider"
+worker_count: 2
+master_name: "k8s-master-01"
+worker_name_prefix: "k8s-worker-"
+
+inventory_dest: "./hosts_k8s.ini"
+
+k8s_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+k8s_ssh_extra_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
+
+# Demo app automation (optional)
+deploy_nginx_demo: true
+nginx_namespace: "default"
+nginx_nodeport: 32002

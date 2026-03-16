@@ -1,0 +1,128 @@
+---
+# ── KServe Predictor Role — Ansible Tasks ──
+
+- name: Ensure predictor namespace exists
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    create namespace {{ predictor_namespace }} --dry-run=client -o yaml
+  register: ns_yaml
+  changed_when: false
+
+- name: Apply predictor namespace
+  ansible.builtin.shell: |
+    echo "{{ ns_yaml.stdout }}" | kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config apply -f -
+  changed_when: "'created' in ns_result.stdout or 'configured' in ns_result.stdout"
+  register: ns_result
+  failed_when: ns_result.rc != 0
+
+- name: Create staging directory for predictor code
+  ansible.builtin.file:
+    path: /tmp/predictor-code
+    state: directory
+    mode: "0755"
+
+- name: Copy predictor source files to master
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: /tmp/predictor-code/{{ item }}
+    mode: "0644"
+    force: true
+  loop:
+    - model.py
+    - inference.py
+    - requirements.txt
+
+- name: Create predictor-code ConfigMap from files
+  ansible.builtin.shell: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    create configmap predictor-code
+    --from-file=/tmp/predictor-code/model.py
+    --from-file=/tmp/predictor-code/inference.py
+    --from-file=/tmp/predictor-code/requirements.txt
+    --dry-run=client -o yaml |
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config apply -f -
+  register: cm_result
+  changed_when: "'created' in cm_result.stdout or 'configured' in cm_result.stdout"
+
+- name: Render KServe predictor manifest
+  ansible.builtin.template:
+    src: kserve_predictor.yaml.j2
+    dest: /tmp/kserve_predictor.yaml
+    mode: "0644"
+
+- name: Apply KServe predictor manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    apply -f /tmp/kserve_predictor.yaml
+  register: predictor_apply
+  changed_when: "'created' in predictor_apply.stdout or 'configured' in predictor_apply.stdout"
+
+- name: Check if pod-predictor deployment already exists
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    get deployment pod-predictor --no-headers
+  register: predictor_exists
+  changed_when: false
+  failed_when: false
+
+- name: Restart deployment to pick up ConfigMap changes
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    rollout restart deployment/pod-predictor
+  when: cm_result is changed and predictor_exists.rc == 0 and predictor_apply is not changed
+
+- name: Display predictor apply result
+  ansible.builtin.debug:
+    msg: "{{ predictor_apply.stdout_lines }}"
+
+- name: Wait for pod-predictor deployment to be ready
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    rollout status deployment/pod-predictor --timeout=900s
+  changed_when: false
+
+- name: Show predictor service details
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    get svc pod-predictor -o wide
+  register: predictor_svc
+  changed_when: false
+
+- name: Display predictor access info
+  ansible.builtin.debug:
+    msg:
+      - "Pod Predictor deployed successfully!"
+      - "Service: {{ predictor_svc.stdout }}"
+      - "Access URL: http://{{ hostvars['localhost'].master_fip | default(ansible_host) }}:{{ predictor_nodeport }}/predict"
+      - "Health Check: http://{{ hostvars['localhost'].master_fip | default(ansible_host) }}:{{ predictor_nodeport }}/health"
+
+# ── Deploy Prediction Exporter (bridges predictor → Prometheus → Grafana) ──
+
+- name: Render prediction exporter manifest
+  ansible.builtin.template:
+    src: prediction_exporter.yaml.j2
+    dest: /tmp/prediction_exporter.yaml
+    mode: "0644"
+
+- name: Apply prediction exporter manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    apply -f /tmp/prediction_exporter.yaml
+  register: exporter_apply
+  changed_when: "'created' in exporter_apply.stdout or 'configured' in exporter_apply.stdout"
+
+- name: Wait for prediction-exporter deployment to be ready
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/home/{{ ansible_user }}/.kube/config
+    -n {{ predictor_namespace }}
+    rollout status deployment/prediction-exporter --timeout=120s
+  changed_when: false
+
+- name: Display exporter status
+  ansible.builtin.debug:
+    msg: "{{ exporter_apply.stdout_lines }}"

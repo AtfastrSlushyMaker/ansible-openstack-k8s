@@ -1,0 +1,14 @@
+[k8s_master]
+master_node ansible_host={{ master_fip }} floating_ip={{ master_fip }} fixed_ip={{ master_fixed_ip }}
+
+[k8s_workers]
+{% for ip in worker_fips if ip is not none %}
+worker_{{ loop.index0 }} ansible_host={{ ip }} floating_ip={{ ip }} fixed_ip={{ worker_fixed_ips[loop.index0] | default('unknown') }}
+{% endfor %}
+
+[all:vars]
+ansible_user={{ ansible_user }}
+ansible_password={{ ansible_password }}
+ansible_become=true
+ansible_become_password={{ ansible_become_password }}
+ansible_ssh_common_args='{{ k8s_ssh_common_args }}'
